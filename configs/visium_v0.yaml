@@ -1,0 +1,43 @@
+# Configuration for the first Visium spatial transcriptomics experiment.
+
+data:
+  # Path to processed CSV or Parquet file containing spots.
+  # Columns must include: section_id, x, y, z (or the names below), and gene columns.
+  input_path: "data/processed/visium_spots.parquet"
+
+  coord_cols: ["x", "y", "z"]
+  section_col: "section_id"
+
+  # Section ID to hold out for evaluation (all others used for training).
+  held_out_section: "section_1"
+
+  # Subset of gene columns to model.  Leave empty ([]) to use ALL gene columns.
+  gene_cols: []
+
+  # DataLoader settings
+  batch_size: 1024
+  num_workers: 4
+
+model:
+  hidden_dims: [256, 256, 256]
+  use_positional_encoding: true
+  n_freqs: 6              # frequency bands for sinusoidal encoding
+  dropout: 0.0
+
+training:
+  n_epochs: 200
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  device: "cpu"           # set to "cuda" or "mps" for GPU acceleration
+  log_every: 20           # print loss every N epochs
+
+output:
+  checkpoint_dir: "outputs/checkpoints"
+  checkpoint_name: "visium_v0.pt"
+  predictions_dir: "outputs/predictions"
+  predictions_name: "visium_v0_predictions.parquet"
+  figures_dir: "outputs/figures"
+
+  # Genes to include in the spatial map figures (subset of gene_cols above).
+  # If empty, the first 4 modelled genes are plotted.
+  plot_genes: []
