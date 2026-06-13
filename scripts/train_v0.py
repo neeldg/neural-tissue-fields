@@ -201,7 +201,11 @@ def main():
     pred_df = df_test[coord_cols + [section_col]].copy()
     pred_df[gene_cols] = true_tensor.numpy()
     pred_df[pred_cols] = preds_tensor.numpy()
-    pred_df.to_parquet(pred_path, index=False)
+    try:
+        pred_df.to_parquet(pred_path, index=False)
+    except ImportError:
+        pred_path = pred_path.with_suffix(".csv")
+        pred_df.to_csv(pred_path, index=False)
     log.info("Predictions saved → %s", pred_path)
 
     # Save metrics CSV alongside predictions.

@@ -1,0 +1,44 @@
+# Configuration for training on the synthetic spatial transcriptomics dataset.
+# Generate the data first:
+#   python scripts/make_synthetic_data.py
+# Then train:
+#   python scripts/train_v0.py --config configs/synthetic_v0.yaml
+
+data:
+  # make_synthetic_data.py writes .parquet if pyarrow is installed, else .csv.
+  input_path: "data/processed/synthetic_sections.csv"
+
+  coord_cols: ["x", "y", "z"]
+  section_col: "section_id"
+
+  # Hold out section_2 (middle section) to test interpolation across z.
+  held_out_section: "section_2"
+
+  # Empty → use all 20 gene columns automatically.
+  gene_cols: []
+
+  batch_size: 512
+  num_workers: 0   # 0 is safest on macOS with multiprocessing + fork
+
+model:
+  hidden_dims: [128, 128, 128]
+  use_positional_encoding: true
+  n_freqs: 6
+  dropout: 0.0
+
+training:
+  n_epochs: 300
+  lr: 5.0e-4
+  weight_decay: 1.0e-5
+  device: "cpu"     # change to "mps" on Apple Silicon or "cuda" on GPU machines
+  log_every: 30
+
+output:
+  checkpoint_dir: "outputs/checkpoints"
+  checkpoint_name: "synthetic_v0.pt"
+  predictions_dir: "outputs/predictions"
+  predictions_name: "synthetic_v0_predictions.parquet"
+  figures_dir: "outputs/figures"
+
+  # Plot the first hotspot gene (gene_12) and a smooth wave (gene_0) alongside two others.
+  plot_genes: ["gene_0", "gene_4", "gene_12", "gene_14"]
