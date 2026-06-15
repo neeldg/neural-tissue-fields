@@ -31,11 +31,14 @@ training:
   device: "cpu"           # set to "cuda" or "mps" for GPU acceleration
   log_every: 20           # print loss every N epochs
 
+baselines:
+  knn_k: 10
+
 output:
+  run_name: "visium_v0"
   checkpoint_dir: "outputs/checkpoints"
   checkpoint_name: "visium_v0.pt"
   predictions_dir: "outputs/predictions"
-  predictions_name: "visium_v0_predictions.parquet"
   figures_dir: "outputs/figures"
 
   # Genes to include in the spatial map figures (subset of gene_cols above).

@@ -33,11 +33,14 @@ training:
   device: "cpu"     # change to "mps" on Apple Silicon or "cuda" on GPU machines
   log_every: 30
 
+baselines:
+  knn_k: 10
+
 output:
+  run_name: "synthetic_v0"
   checkpoint_dir: "outputs/checkpoints"
   checkpoint_name: "synthetic_v0.pt"
   predictions_dir: "outputs/predictions"
-  predictions_name: "synthetic_v0_predictions.parquet"
   figures_dir: "outputs/figures"
 
   # Plot the first hotspot gene (gene_12) and a smooth wave (gene_0) alongside two others.

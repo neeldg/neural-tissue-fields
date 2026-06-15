@@ -1,5 +1,7 @@
 """End-to-end training script: hold out one section, train, predict, save.
 
+Produces per-method prediction CSVs and a combined metrics file.
+
 Usage:
     python scripts/train_v0.py --config configs/visium_v0.yaml
 
@@ -13,19 +15,24 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
 from torch.utils.data import DataLoader
 
-# Make sure the repo root is on sys.path when running as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.dataset import SpatialExpressionDataset
+from src.eval.baselines import (
+    knn_xyz_baseline,
+    linear_z_interpolation_baseline,
+    nearest_section_baseline,
+)
 from src.eval.metrics import compute_metrics, summarize_metrics
 from src.models.mlp_field import CoordinateMLP
 from src.training.train import train
-from src.viz.plot_gene_maps import plot_gene_maps, plot_pearson_barplot
+from src.viz.plot_gene_maps import plot_gene_maps, plot_method_comparison, plot_pearson_barplot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +59,6 @@ def apply_overrides(cfg: dict, overrides: list[str]) -> dict:
         node = cfg
         for k in keys[:-1]:
             node = node.setdefault(k, {})
-        # Try to cast to int/float/bool, otherwise keep as string.
         for cast in (int, float):
             try:
                 raw_value = cast(raw_value)
@@ -83,11 +89,39 @@ def load_dataframe(path: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Saving helpers
+# ---------------------------------------------------------------------------
+
+def save_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
+def save_predictions(
+    df_test: pd.DataFrame,
+    coord_cols: list[str],
+    section_col: str,
+    gene_cols: list[str],
+    pred_array: np.ndarray,
+    path: Path,
+) -> None:
+    """Write a prediction CSV with metadata columns + true + predicted expression."""
+    pred_cols = [f"{g}_pred" for g in gene_cols]
+    out = df_test[coord_cols + [section_col]].copy()
+    out[gene_cols] = df_test[gene_cols].values
+    out[pred_cols] = pred_array
+    save_csv(out, path)
+    log.info("Predictions saved → %s", path)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Train neural field on spatial transcriptomics.")
+    parser = argparse.ArgumentParser(
+        description="Train neural field on spatial transcriptomics."
+    )
     parser.add_argument("--config", required=True, help="Path to YAML config file.")
     args, overrides = parser.parse_known_args()
 
@@ -105,12 +139,10 @@ def main():
 
     gene_cols: list[str] = cfg["data"].get("gene_cols") or []
     if not gene_cols:
-        # Use all columns that are not coords or the section column.
         skip = set(coord_cols) | {section_col}
         gene_cols = [c for c in df.columns if c not in skip]
         log.info("No gene_cols specified; using all %d gene columns.", len(gene_cols))
 
-    # Split
     mask_heldout = df[section_col].astype(str) == held_out
     df_train = df[~mask_heldout].reset_index(drop=True)
     df_test = df[mask_heldout].reset_index(drop=True)
@@ -119,11 +151,10 @@ def main():
         len(df_train), held_out, len(df_test),
     )
 
-    # Build datasets (fit normalisation bounds on training data only).
     train_dataset = SpatialExpressionDataset(df_train, coord_cols, gene_cols)
     test_dataset = SpatialExpressionDataset(
         df_test, coord_cols, gene_cols,
-        coord_bounds=train_dataset.coord_bounds,  # reuse training bounds
+        coord_bounds=train_dataset.coord_bounds,
     )
 
     batch_size: int = cfg["data"].get("batch_size", 1024)
@@ -151,6 +182,11 @@ def main():
     train_cfg = cfg["training"]
     out_cfg = cfg["output"]
 
+    run_name: str = out_cfg.get(
+        "run_name",
+        Path(out_cfg.get("checkpoint_name", "run")).stem,
+    )
+
     ckpt_dir = Path(out_cfg["checkpoint_dir"])
     ckpt_path = ckpt_dir / out_cfg["checkpoint_name"]
 
@@ -166,82 +202,135 @@ def main():
     )
     log.info("Final train loss: %.6f", history["train_loss"][-1])
 
-    # ---- Predict on held-out section ----
+    # ---- Neural field predictions ----
     device = torch.device(train_cfg.get("device", "cpu"))
     model.eval()
     model = model.to(device)
 
-    all_preds = []
+    all_preds: list[torch.Tensor] = []
     with torch.no_grad():
         test_loader = DataLoader(
             test_dataset, batch_size=batch_size * 4, shuffle=False
         )
         for coords, _ in test_loader:
             coords = coords.to(device)
-            preds = model(coords).cpu()
-            all_preds.append(preds)
+            all_preds.append(model(coords).cpu())
 
-    preds_tensor = torch.cat(all_preds, dim=0)  # (N_test, G)
-    true_tensor = test_dataset.exprs             # (N_test, G)
+    nf_preds = torch.cat(all_preds, dim=0).numpy()    # (N_test, G)
+    true_arr = test_dataset.exprs.numpy()              # (N_test, G)
 
-    # ---- Metrics ----
-    metrics_df = compute_metrics(true_tensor, preds_tensor, gene_names=gene_cols)
-    summary = summarize_metrics(metrics_df)
-    log.info(
-        "Held-out metrics  MSE=%.4f  MAE=%.4f  Pearson_r=%.4f",
-        summary["mse"], summary["mae"], summary["pearson_r"],
-    )
+    # ---- Baseline predictions ----
+    log.info("Computing baselines …")
 
-    # ---- Save predictions ----
+    knn_k: int = cfg.get("baselines", {}).get("knn_k", 10)
+
+    ns_preds = nearest_section_baseline(df_train, df_test, coord_cols, gene_cols)
+    log.info("  nearest_section done")
+
+    lz_preds = linear_z_interpolation_baseline(df_train, df_test, coord_cols, gene_cols)
+    log.info("  linear_z_interpolation done")
+
+    knn_preds = knn_xyz_baseline(df_train, df_test, coord_cols, gene_cols, k=knn_k)
+    log.info("  knn (k=%d) done", knn_k)
+
+    # ---- Save per-method prediction CSVs ----
     pred_dir = Path(out_cfg["predictions_dir"])
-    pred_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = pred_dir / out_cfg["predictions_name"]
 
-    pred_cols = [f"{g}_pred" for g in gene_cols]
-    pred_df = df_test[coord_cols + [section_col]].copy()
-    pred_df[gene_cols] = true_tensor.numpy()
-    pred_df[pred_cols] = preds_tensor.numpy()
-    try:
-        pred_df.to_parquet(pred_path, index=False)
-    except ImportError:
-        pred_path = pred_path.with_suffix(".csv")
-        pred_df.to_csv(pred_path, index=False)
-    log.info("Predictions saved → %s", pred_path)
+    methods: list[tuple[str, np.ndarray]] = [
+        ("neural_field", nf_preds),
+        ("nearest_section", ns_preds),
+        ("linear_z", lz_preds),
+        ("knn", knn_preds),
+    ]
 
-    # Save metrics CSV alongside predictions.
-    metrics_path = pred_dir / (Path(out_cfg["predictions_name"]).stem + "_metrics.csv")
-    metrics_df.to_csv(metrics_path)
-    log.info("Metrics saved → %s", metrics_path)
+    for method_name, preds in methods:
+        save_predictions(
+            df_test=df_test,
+            coord_cols=coord_cols,
+            section_col=section_col,
+            gene_cols=gene_cols,
+            pred_array=preds,
+            path=pred_dir / f"{run_name}_{method_name}_predictions.csv",
+        )
+
+    # ---- Compute and save combined metrics ----
+    all_metrics: list[pd.DataFrame] = []
+    for method_name, preds in methods:
+        m = compute_metrics(true_arr, preds, gene_names=gene_cols)
+        summary = summarize_metrics(m)
+        log.info(
+            "%-22s  MSE=%.4f  MAE=%.4f  Pearson_r=%.4f",
+            method_name, summary["mse"], summary["mae"], summary["pearson_r"],
+        )
+        m = m.reset_index().rename(columns={"index": "gene"})
+        m.insert(0, "method", method_name)
+        all_metrics.append(m)
+
+    combined = pd.concat(all_metrics, ignore_index=True)
+    combined_path = pred_dir / f"{run_name}_all_metrics.csv"
+    save_csv(combined, combined_path)
+    log.info("Combined metrics saved → %s", combined_path)
 
     # ---- Figures ----
+    import matplotlib.pyplot as plt
+
     fig_dir = Path(out_cfg["figures_dir"])
     fig_dir.mkdir(parents=True, exist_ok=True)
 
+    nf_metrics = combined[combined["method"] == "neural_field"].set_index("gene")
+
     plot_genes: list[str] = out_cfg.get("plot_genes") or gene_cols[:4]
-    plot_genes = [g for g in plot_genes if g in gene_cols]  # guard against typos
+    plot_genes = [g for g in plot_genes if g in gene_cols]
 
     if plot_genes:
-        pred_cols_to_plot = [f"{g}_pred" for g in plot_genes]
+        g_indices = [gene_cols.index(g) for g in plot_genes]
+
+        # Simple true-vs-neural-field map (2 columns).
+        pred_cols_plot = [f"{g}_pred" for g in plot_genes]
+        plot_df = df_test[coord_cols + [section_col] + plot_genes].copy()
+        plot_df[pred_cols_plot] = nf_preds[:, g_indices]
+
         fig = plot_gene_maps(
-            df=pred_df,
+            df=plot_df,
             gene_names=plot_genes,
             true_cols=plot_genes,
-            pred_cols=pred_cols_to_plot,
+            pred_cols=pred_cols_plot,
             x_col=coord_cols[0],
             y_col=coord_cols[1],
-            save_path=fig_dir / "gene_maps.png",
+            save_path=fig_dir / f"{run_name}_gene_maps.png",
         )
-        import matplotlib.pyplot as plt
         plt.close(fig)
-        log.info("Gene maps saved → %s/gene_maps.png", fig_dir)
+        log.info("Gene maps saved → %s/%s_gene_maps.png", fig_dir, run_name)
 
-    fig2 = plot_pearson_barplot(
-        metrics_df["pearson_r"],
-        save_path=fig_dir / "pearson_r.png",
+        # Multi-method comparison figure (True | baselines | NF | NF error).
+        fig_comp = plot_method_comparison(
+            x=df_test[coord_cols[0]].values,
+            y=df_test[coord_cols[1]].values,
+            true_expr=true_arr[:, g_indices],
+            method_preds=[
+                ("Nearest section",   ns_preds[:, g_indices]),
+                ("Linear-z interp.",  lz_preds[:, g_indices]),
+                ("KNN",               knn_preds[:, g_indices]),
+                ("Neural field",      nf_preds[:, g_indices]),
+            ],
+            gene_names=plot_genes,
+            x_label=coord_cols[0],
+            y_label=coord_cols[1],
+            save_path=fig_dir / f"{run_name}_method_comparison_gene_maps.png",
+        )
+        plt.close(fig_comp)
+        log.info(
+            "Method comparison figure saved → %s/%s_method_comparison_gene_maps.png",
+            fig_dir, run_name,
+        )
+
+    fig_pearson = plot_pearson_barplot(
+        nf_metrics["pearson_r"],
+        title=f"Neural field – per-gene Pearson r (held-out: {held_out})",
+        save_path=fig_dir / f"{run_name}_pearson_r.png",
     )
-    import matplotlib.pyplot as plt
-    plt.close(fig2)
-    log.info("Pearson barplot saved → %s/pearson_r.png", fig_dir)
+    plt.close(fig_pearson)
+    log.info("Pearson barplot saved → %s/%s_pearson_r.png", fig_dir, run_name)
 
     log.info("Done.")
 
