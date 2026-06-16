@@ -1,9 +1,19 @@
-# Configuration for the first Visium spatial transcriptomics experiment.
+# Configuration for training on real 10x Visium data.
+#
+# Prerequisites — preprocess each section first:
+#   python scripts/preprocess_visium.py \
+#       --visium-dir /path/to/spaceranger/outs/ \
+#       --section-id <section_id> --z <section_index>
+#
+# If you have multiple sections, combine the outputs into one file before training:
+#   python scripts/combine_sections.py  (to be added)
+#
+# Then point input_path below at the combined parquet/CSV.
 
 data:
-  # Path to processed CSV or Parquet file containing spots.
-  # Columns must include: section_id, x, y, z (or the names below), and gene columns.
-  input_path: "data/processed/visium_spots.parquet"
+  # Combined spot table produced by preprocessing + (optional) combination step.
+  # Columns: section_id, x, y, z, <gene columns>
+  input_path: "data/processed/visium_sections.parquet"
 
   coord_cols: ["x", "y", "z"]
   section_col: "section_id"
