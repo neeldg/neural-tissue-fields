@@ -247,13 +247,18 @@ def save_predictions(
     knn_preds: np.ndarray,
     path: Path,
 ) -> None:
-    out = df_test[["x", "y"]].copy()
+    nf_pred_cols  = [f"{c}_nf_pred"  for c in gene_cols]
+    knn_pred_cols = [f"{c}_knn_pred" for c in gene_cols]
+
+    parts: list[pd.DataFrame] = []
     if "section_id" in df_test.columns:
-        out.insert(0, "section_id", df_test["section_id"].values)
-    out[gene_cols] = df_test[gene_cols].values
-    for g, col in enumerate(gene_cols):
-        out[f"{col}_nf_pred"]  = nf_preds[:, g]
-        out[f"{col}_knn_pred"] = knn_preds[:, g]
+        parts.append(df_test[["section_id"]].reset_index(drop=True))
+    parts.append(df_test[["x", "y"]].reset_index(drop=True))
+    parts.append(df_test[gene_cols].reset_index(drop=True))
+    parts.append(pd.DataFrame(nf_preds,  columns=nf_pred_cols))
+    parts.append(pd.DataFrame(knn_preds, columns=knn_pred_cols))
+
+    out = pd.concat(parts, axis=1)
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
     log.info("Predictions saved → %s", path)
