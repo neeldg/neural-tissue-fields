@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -38,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data.dataset import SpatialExpressionDataset
 from src.eval.baselines import knn_xyz_baseline
 from src.eval.metrics import compute_metrics, summarize_metrics
+from src.models.coordinate_encodings import GridField
 from src.models.mlp_field import CoordinateMLP
 from src.training.train import train as train_model
 from src.viz.plot_gene_maps import plot_method_comparison
@@ -76,8 +78,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--hidden-dims", type=str, default="256,256,256",
                    help="Comma-separated MLP hidden layer widths.")
+    # Encoding
+    p.add_argument("--encoding", choices=["fourier", "grid"], default="fourier",
+                   help="Coordinate encoding: 'fourier' (sinusoidal NeRF-style) "
+                        "or 'grid' (learnable multi-resolution grids).")
     p.add_argument("--n-freqs", type=int, default=6,
-                   help="Positional encoding frequency bands.")
+                   help="Frequency bands for --encoding fourier.")
+    p.add_argument("--grid-resolutions", type=str, default="16,32,64,128",
+                   help="Comma-separated grid resolutions for --encoding grid.")
+    p.add_argument("--grid-features", type=int, default=8,
+                   help="Feature channels per resolution level for --encoding grid.")
     p.add_argument("--knn-k", type=int, default=10,
                    help="Number of neighbours for the KNN baseline.")
     p.add_argument("--output-prefix", required=True,
@@ -179,6 +189,33 @@ def split(df: pd.DataFrame, mode: str, fraction: float,
 
 
 # ---------------------------------------------------------------------------
+# Model construction
+# ---------------------------------------------------------------------------
+
+def build_model(n_genes: int, args: argparse.Namespace) -> nn.Module:
+    """Construct the neural field model from parsed CLI args."""
+    hidden_dims = [int(w) for w in args.hidden_dims.split(",")]
+
+    if args.encoding == "fourier":
+        return CoordinateMLP(
+            n_genes=n_genes,
+            coord_dim=2,
+            hidden_dims=hidden_dims,
+            use_positional_encoding=True,
+            n_freqs=args.n_freqs,
+        )
+
+    # grid
+    resolutions = [int(r) for r in args.grid_resolutions.split(",")]
+    return GridField(
+        n_genes=n_genes,
+        resolutions=resolutions,
+        n_features=args.grid_features,
+        hidden_dims=hidden_dims,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Neural field training + inference
 # ---------------------------------------------------------------------------
 
@@ -186,15 +223,14 @@ def run_neural_field(
     df_train: pd.DataFrame,
     df_test: pd.DataFrame,
     gene_cols: list[str],
+    model: nn.Module,
     *,
-    hidden_dims: list[int],
-    n_freqs: int,
     n_epochs: int,
     batch_size: int,
     lr: float,
     device: torch.device,
 ) -> np.ndarray:
-    """Train the CoordinateMLP on (x, y) and return (N_test, G) predictions."""
+    """Train ``model`` on (x, y) → expression and return (N_test, G) predictions."""
     train_ds = SpatialExpressionDataset(df_train, COORD_COLS, gene_cols)
     test_ds = SpatialExpressionDataset(
         df_test, COORD_COLS, gene_cols,
@@ -205,13 +241,6 @@ def run_neural_field(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=0,
     )
 
-    model = CoordinateMLP(
-        n_genes=len(gene_cols),
-        coord_dim=2,
-        hidden_dims=hidden_dims,
-        use_positional_encoding=True,
-        n_freqs=n_freqs,
-    )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info("Model: %d trainable parameters", n_params)
 
@@ -366,12 +395,20 @@ def main():
     true_arr = df_test[gene_cols].values.astype(np.float32)
 
     # ── Neural field ──────────────────────────────────────────────────────
-    hidden_dims = [int(w) for w in args.hidden_dims.split(",")]
+    model = build_model(len(gene_cols), args)
+    log.info("Encoding: %s  →  %s", args.encoding, type(model).__name__)
+
+    # F.grid_sample backward is not implemented on MPS; fall back to CPU.
+    if device.type == "mps" and isinstance(model, GridField):
+        log.warning(
+            "grid_sampler_2d_backward is not implemented on MPS. "
+            "Falling back to CPU for GridField training."
+        )
+        device = torch.device("cpu")
+
     log.info("Training neural field …")
     nf_preds = run_neural_field(
-        df_train, df_test, gene_cols,
-        hidden_dims=hidden_dims,
-        n_freqs=args.n_freqs,
+        df_train, df_test, gene_cols, model,
         n_epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
