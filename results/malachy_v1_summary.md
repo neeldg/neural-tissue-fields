@@ -1,3 +1,27 @@
+## Spatial-gene benchmark
+
+Gene selection: top 30 genes ranked by KNN-smoothed spatial structure.
+
+### Stripe holdout, MLP
+
+| Method | Mean MSE | Mean MAE | Mean Pearson r |
+|---|---:|---:|---:|
+| KNN | 0.4301 | 0.2409 | 0.1125 |
+| MLP neural field | 0.4132 | 0.2382 | 0.0986 |
+
+Interpretation: spatial gene selection increases the amount of predictable spatial signal. KNN remains stronger on Pearson for stripe holdout, while MLP is slightly better on MSE/MAE.
+
+### Quadrant holdout, GridField
+
+| Method | Mean MSE | Mean MAE | Mean Pearson r |
+|---|---:|---:|---:|
+| KNN | 0.5610 | 0.2736 | 0.0320 |
+| GridField neural field | 0.4513 | 0.2355 | 0.0476 |
+
+Interpretation: GridField beats KNN on the harder quadrant spatial-gene benchmark across Pearson, MSE, and MAE.
+
+
+
 # MALACHY v1 preliminary results
 
 Dataset: 10x Visium HD Human Breast Cancer TMA, square_016um  

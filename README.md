@@ -42,7 +42,23 @@ python scripts/preprocess_visium_hd.py \
     --n-top-genes 50
 ```
 
-Train and evaluate an MLP neural field with stripe holdout:
+Select spatially variable genes first, then train on them:
+
+```bash
+python scripts/select_spatial_genes.py \
+    --input data/processed/breast_tma_hd_0_square016.parquet \
+    --top-n 30
+
+python scripts/train_2d_holdout.py \
+    --input data/processed/breast_tma_hd_0_square016.parquet \
+    --holdout-mode stripe \
+    --model mlp \
+    --epochs 50 \
+    --gene-list outputs/spatial_genes/breast_tma_hd_0_square016_spatial_genes.txt \
+    --output-prefix breast_tma_stripe_mlp_spatial30
+```
+
+Or train on all genes without a gene list:
 
 ```bash
 python scripts/train_2d_holdout.py \

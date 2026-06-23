@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output-prefix", required=True,
                    help="Prefix for all output filenames.")
+    p.add_argument("--gene-list",
+                   help="Path to a text file with genes to train on — "
+                        "comma-separated on one line or one gene per line "
+                        "(e.g. output of select_spatial_genes.py).  "
+                        "Genes absent from the input table are skipped with a warning.")
     p.add_argument("--plot-genes",
                    help="Comma-separated gene names to visualise (default: first 4).")
     p.add_argument("--device", default="auto",
@@ -121,6 +126,18 @@ def load_table(path: Path) -> pd.DataFrame:
 
 def extract_gene_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c not in META_COLS]
+
+
+def load_gene_list(path: str) -> list[str]:
+    """Parse a gene-list file: comma-separated or one gene per line."""
+    text = Path(path).read_text().strip()
+    # Try comma-separated first; fall back to newline-separated.
+    if "," in text:
+        genes = [g.strip() for g in text.split(",") if g.strip()]
+    else:
+        genes = [line.strip() for line in text.splitlines()
+                 if line.strip() and not line.startswith("#")]
+    return genes
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +376,24 @@ def main():
     gene_cols = extract_gene_cols(df)
     if not gene_cols:
         sys.exit("No gene columns found (expected all columns except section_id, x, y, z).")
-    log.info("%d gene columns", len(gene_cols))
+    log.info("%d gene columns in table", len(gene_cols))
+
+    # ── Gene-list filter ──────────────────────────────────────────────────
+    if args.gene_list:
+        if not Path(args.gene_list).exists():
+            sys.exit(f"Gene list file not found: {args.gene_list}")
+        requested = load_gene_list(args.gene_list)
+        available = set(gene_cols)
+        missing = [g for g in requested if g not in available]
+        if missing:
+            log.warning("Genes in --gene-list not found in table (%d): %s",
+                        len(missing), missing)
+        gene_cols = [g for g in requested if g in available]
+        if not gene_cols:
+            sys.exit("No requested genes are present in the input table.")
+        preview = ", ".join(gene_cols[:10])
+        suffix = f" … (+{len(gene_cols)-10} more)" if len(gene_cols) > 10 else ""
+        log.info("Using %d genes from --gene-list: %s%s", len(gene_cols), preview, suffix)
 
     # ── Split ─────────────────────────────────────────────────────────────
     df_train, df_test = split(df, args.holdout_mode, args.holdout_fraction, rng)
