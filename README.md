@@ -64,6 +64,19 @@ python scripts/train_2d_holdout.py \
     --output-prefix breast_tma_quadrant_grid
 ```
 
+Select spatially variable genes (run before training for best results):
+
+```bash
+python scripts/select_spatial_genes.py \
+    --input data/processed/breast_tma_hd_0_square016.parquet \
+    --top-n 30 --plot
+```
+
+This ranks genes by a spatial autocorrelation score and writes:
+- `outputs/spatial_genes/{stem}_spatial_genes.csv` — full ranked table
+- `outputs/spatial_genes/{stem}_spatial_genes.txt` — top-N gene names, comma-separated
+- `outputs/figures/spatial_gene_ranking.png` — bar chart (if `--plot`)
+
 Summarize results:
 
 ```bash
